@@ -8,6 +8,24 @@
 
 Project 返回 id/title/status/current_version_id/revision；Version 返回 id/project_id/number/status/title/description/assets/revision/published_at；Asset 返回 id/display_name/kind/bytes/status/failure_code，不返回私有对象 key；Decision 返回 id/version_id/outcome/message/decided_at/receipt_id。外部响应不含内部成员名单、配额、对象 key 或未授权版本 ID。
 
+### v1.3 字段定稿（文字设计，尚未实现）
+
+无值统一为 JSON null：Project.current_version_id、Version.published_at、Asset.failure_code、评论的asset_id、分页结束的next_cursor。空列表为数组。Asset.kind和上传kind取JPEG/PNG/PDF，分别对应image/jpeg、image/png、application/pdf；界面名称不替代服务端类型检查。
+
+| 响应/输入 | data形状或约束 |
+|---|---|
+| 发布首次201／成功重放200 | 首次为version、share_id、share_url；重放为version、share_id、secret_replay_available=false，不返回share_url |
+| 重发分享首次201／成功重放200 | 首次为share_id、share_url；重放为share_id、secret_replay_available=false |
+| 查询上传200 | state、asset_id、received_complete、expires_at；state取数据模型的RECEIVING/PROCESSING/SETTLED/CANCELLED；received_complete为boolean，表示完整接收已持久确认；不能凭此绕过Asset READY |
+| 客户验证200 | data含version（仅本授权Version）；服务端另设置客户Cookie |
+| 客户版本读取200 | data含version、decision；未决定时decision=null，已决定时为Decision |
+| Comment | id、version_id、asset_id、author_kind、body、created_at；author_kind为MEMBER/GUEST，不暴露内部作者ID/名单；读列表的data为Comment数组，分页游标在包络 |
+| 内部评论请求／客户评论请求 | 内部请求含asset_id（可省略或null）、body，version从路径取；客户额外含version_id；成功201的data为Comment |
+
+决定请求增加必填boolean字段acknowledged。APPROVED必须为true且acknowledgement_version=REVIEW_CONFIRM_V1；CHANGES_REQUESTED必须为false且acknowledgement_version=null，说明仍必填。服务端验证其类型、组合和文案版本，不接受字符串true代替boolean。该字段只记录客户端的显式确认声明，不能证明实际阅读、实名或企业授权。确认文案版本与决定时快照固定保存。
+
+Receipt文字形状：id、decision_id、schema_version（首版整数1）、project_snapshot（id/title/workspace_name）、version_snapshot（id/number/title/description/published_at）、files_snapshot（数组，每项id/display_name/position/bytes/mime/sha256）、comments_snapshot（Comment数组）、identity_method（verified_email/verified_at/decided_at/description/acknowledgement_version）、outcome、message、snapshot_digest。记录中的项目、版本、附件和评论均取决定时快照。内外记录读取的data为该Receipt，导出的JSON文件本体为同一Receipt（无请求包络），打印使用同一快照；身份说明固定表达邮箱控制权的范围。摘要的规范序列化、编码和算法在T01冻结并实测，样例占位不能当真实摘要。权限与删除规则仍优先适用。
+
 ## 身份与空间
 
 | 方法与路径 | 输入 | 输出／限制 |
@@ -54,7 +72,7 @@ Project 返回 id/title/status/current_version_id/revision；Version 返回 id/p
 |---|---|---|
 | POST /versions/{id}/uploads | display_name、declared_bytes、kind | 201；upload_id、asset_id、expires_at；预留配额，15分钟有效 |
 | PUT /uploads/{id}/content | 二进制流；Content-Type；声明长度 | 202；Asset PENDING_SCAN；唯一内容写入，流式检查实际大小 |
-| GET /uploads/{id} | 无 | 200；reservation状态、asset_id、实际接收是否完成及expires_at；仅原内部空间可见 |
+| GET /uploads/{id} | 无 | 200；state、asset_id、received_complete、expires_at；仅原内部空间可见 |
 | GET /assets/{id} | 无 | 200；状态、错误码、大小和文件信息 |
 | POST /assets/{id}/retry | 无 | 202；仅完整原件且可重试的 FAILED |
 | DELETE /assets/{id} | expected_version_revision | 202；仅草稿、进入清理状态 |
@@ -72,7 +90,7 @@ Project 返回 id/title/status/current_version_id/revision；Version 返回 id/p
 | GET /review/comments | cursor | 授权版本评论；不返回内部其他项目数据 |
 | POST /review/comments | version_id、asset_id 可空、body | 201；version_id须匹配当前会话，本轮审阅中；纯文本 |
 | POST /review/assets/{id}/download | variant | 200 短时 URL；附件必须在授权版本内 |
-| POST /review/decisions | version_id、outcome、message、acknowledgement_version、expected_version_revision | 201 Decision；版本须与会话一致；确认需显式勾选说明 |
+| POST /review/decisions | version_id、outcome、message、acknowledged、acknowledgement_version、expected_version_revision | 201 Decision；版本须与会话一致；确认字段规则见v1.3定义 |
 | GET /review/receipt | 无 | 200 固定快照；有决定且客户授权仍有效 |
 | POST /review/logout | 无 | 204；撤销客户会话 |
 
@@ -96,8 +114,12 @@ GET /versions/{id}/comments 与 POST /versions/{id}/comments 分别读取和追�
 | 429 | RATE_LIMITED、QUOTA_EXCEEDED | 返回 retry_after 或额度说明 |
 | 503 | SERVICE_UNAVAILABLE | 显示可重试，决定请求先查询真实结果 |
 
-创建项目/版本/上传预留、发布、重发分享、评论、决定要求 Idempotency-Key。幂等范围是身份+路由+键；同键同内容返回原业务结果，同键不同内容返回409。重放发布或分享返回200及 share_id、secret_replay_available=false，原密钥只首次返回；用户确需链接时显式重发并撤销旧授权。服务不能以重试请求静默产生新版本、新评论或第二个决定。
+创建项目/版本/上传预留、发布、重发分享、评论、决定要求 Idempotency-Key。幂等范围是身份+路由+键；同键同内容返回原业务结果，同键不同内容返回409。重放发布返回200及 version、share_id、secret_replay_available=false；重放分享返回200及 share_id、secret_replay_available=false。原密钥只首次返回；用户确需链接时显式重发并撤销旧授权。服务不能以重试请求静默产生新版本、新评论或第二个决定。
 
 幂等占位、业务数据和无密钥结果引用同事务提交。并发同键等待原事务（受请求超时约束）；若等待超时返回503并要求同键重试，不再执行一份业务写入。重放也校验当前权限，删除或撤销后的缓存不可返回受限内容。READ_ONLY按业务动作判断，不按POST/GET区分；验证、下载签发、注销及保护性撤销遵循权限文档动作表。
 
-契约验收：T01 补齐请求/响应示例和正式模式文件是后续开发任务；字段、错误与用例先以本文为基线。任何新增端点都需注明鉴权、作用域、事务和审计策略。
+所有已提交成功业务的幂等重放返回200，除分享密钥的明确例外外data保持原业务结果形状；request_id按本次请求产生。权限校验后先处理同键摘要及已提交结果，再对新执行判断状态和revision；不能因成功重放携带提交前revision而拒绝原结果。同键异内容返回IDEMPOTENCY_CONFLICT；新键向已有决定的有效授权版本提交，返回409 ALREADY_DECIDED，既有结果经读接口取得，不要求错误包附带摘要。
+
+决定响应丢失时读取GET /review/version，已有决定则读取GET /review/receipt；仍不确定且授权有效时，使用原键和原参数重试原POST。首版没有按幂等键查询的独立端点。一次未读到结果不等于提交失败；授权切换或失效时停止当前提交入口。
+
+契约验收：本版文字字段与 [开发启动样例](../11_开发启动包/02_请求响应与错误样例.md)共同支持交接；T01生成正式模式文件并验证实现兼容性。尚未明确的认证细节、限流字段和多重错误优先级按启动包待定清单冻结；不得新增未定义端点或宣称已完成运行验证。
