@@ -105,7 +105,7 @@ GET /versions/{id}/comments 与 POST /versions/{id}/comments 分别读取和追�
 | HTTP | code 示例 | 前端处理 |
 |---|---|---|
 | 400/422 | VALIDATION_ERROR、UNSUPPORTED_FILE | 定位字段；保留输入 |
-| 401 | AUTH_REQUIRED、SESSION_EXPIRED | 重新验证，不丢失未提交文字 |
+| 401 | AUTH_REQUIRED、SESSION_EXPIRED | 停止旧授权请求并清理受限内容，重新验证；普通暂时失败可仅在当前页面内存保留输入，刷新或身份切换不承诺恢复，不向新授权轮迁移文字 |
 | 403 | FORBIDDEN、CSRF_FAILED、WORKSPACE_READ_ONLY | 解释权限或服务状态；不自动重试 |
 | 404 | RESOURCE_NOT_FOUND | 不存在及跨空间访问统一表现 |
 | 409 | REVISION_CONFLICT、ALREADY_DECIDED、DRAFT_EXISTS、STATE_CONFLICT、IDEMPOTENCY_CONFLICT | 刷新实际状态，让用户决定下一步 |
